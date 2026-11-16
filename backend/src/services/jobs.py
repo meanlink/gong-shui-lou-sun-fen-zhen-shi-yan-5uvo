@@ -28,3 +28,9 @@ def enqueue(job_id):
         r=Redis.from_url(REDIS_URL); r.rpush('analysis:queue',job_id); r.close()
     except Exception:
         pass # SQL queued status is the durable fallback
+
+def enqueue_share(package_id):
+    try:
+        r=Redis.from_url(REDIS_URL); r.rpush('share:queue',package_id); r.close()
+    except Exception:
+        pass # a stale building row is resumed by the worker scan

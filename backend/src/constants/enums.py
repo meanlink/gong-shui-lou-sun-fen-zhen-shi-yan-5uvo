@@ -8,3 +8,8 @@ class JobStatus(str, Enum):
     running = 'running'
     completed = 'completed'
     failed = 'failed'
+class ShareStatus(str, Enum):
+    building = 'building'
+    ready = 'ready'
+    expired = 'expired'
+    revoked = 'revoked'

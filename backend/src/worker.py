@@ -4,9 +4,10 @@ from sqlalchemy import select
 from redis import Redis
 from src.config.database import Session
 from src.config.settings import REDIS_URL
-from src.models import Job, Dataset, Report
+from src.models import Job, Dataset, Report, SharePackage
 from src.services.business import analyze
 from src.services.reports import deliver
+from src.services.shares import build as build_share, effective_status, purge_artifacts
 from src.services.audit import record
 logging.basicConfig(level=logging.INFO)
 def execute(job_id):
@@ -25,6 +26,28 @@ def execute(job_id):
             j.status='failed';j.error=str(e)[:990];j.finished_at=time.time()
             record(db,'worker','job.failed',{'id':j.id,'error':j.error})
         db.commit()
+def tick_shares():
+    now=time.time()
+    with Session() as db:
+        stale=list(db.scalars(select(SharePackage.id).where(
+            SharePackage.status=='building',
+            SharePackage.revoked_at.is_(None),
+            SharePackage.expires_at>now,
+            (SharePackage.build_lease.is_(None))|(SharePackage.build_lease<now),
+        ).limit(3)))
+    for package_id in stale:build_share(package_id)
+    expired=[]
+    with Session() as db:
+        for p in db.scalars(select(SharePackage).where(SharePackage.status.in_(['building','ready']))):
+            status=effective_status(p,now)
+            if p.status!=status:
+                p.status=status;expired.append(p.public_id);record(db,'worker','share.expired',{'id':p.id})
+        db.commit()
+    for public_id in expired:
+        with Session() as db:
+            p=db.scalar(select(SharePackage).where(SharePackage.public_id==public_id))
+            if p:purge_artifacts(p)
+
 def tick():
     with Session() as db:
         queued=list(db.scalars(select(Job.id).where(Job.status=='queued').limit(3)))
@@ -34,6 +57,7 @@ def tick():
             d=deliver(db,r)
             if d:record(db,'worker','report.delivered',{'id':r.id,'delivery':d.id})
         db.commit()
+    tick_shares()
 def main():
     r=Redis.from_url(REDIS_URL,socket_timeout=3)
     # This Compose stack has a single worker. A crash must not strand its jobs.
@@ -44,8 +68,11 @@ def main():
     while True:
         Path('/tmp/heartbeat').touch()
         try:
-            item=r.blpop('analysis:queue',timeout=1)
-            if item:execute(int(item[1]))
+            item=r.blpop(['analysis:queue','share:queue'],timeout=1)
+            if item:
+                key,value=item[0].decode(),int(item[1])
+                if key=='analysis:queue':execute(value)
+                else:build_share(value)
             tick()
         except Exception:
             logging.exception('Worker retry');time.sleep(2)
